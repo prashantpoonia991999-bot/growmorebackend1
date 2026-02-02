@@ -148,7 +148,6 @@ async def signup(data: UserSignup):
     if await db.users.find_one({"mobile": data.mobile}):
         raise HTTPException(status_code=400, detail="Mobile already registered")
     
-    # Verify referral code
     referrer = await db.users.find_one({"referral_code": data.referral_code})
     if not referrer and data.referral_code != "ADMIN001":
         raise HTTPException(status_code=400, detail="Invalid referral code")
@@ -169,13 +168,12 @@ async def signup(data: UserSignup):
         "referral_income": 0,
         "reward_income": 0,
         "is_active": False,
-        "active_package_id": None,
-        "active_package_name": None,
+        "active_packages": [],  # Array of package IDs user has invested in
+        "withdrawal_qualified": False,  # One-time qualification for withdrawal
         "created_at": datetime.utcnow().isoformat()
     }
     result = await db.users.insert_one(user)
     
-    # Track referral
     if referrer:
         await db.referrals.insert_one({
             "referrer_id": str(referrer["_id"]),
@@ -183,10 +181,7 @@ async def signup(data: UserSignup):
             "referred_user_id": user["user_id"],
             "referred_name": user["full_name"],
             "referred_mobile": user["mobile"],
-            "package_id": None,
-            "package_name": None,
-            "package_amount": 0,
-            "commission_paid": False,
+            "invested_packages": [],  # Track all packages this referral invested in
             "created_at": datetime.utcnow().isoformat()
         })
     
@@ -224,6 +219,14 @@ async def reset_transaction_password(data: dict, user = Depends(get_current_user
 
 @api_router.get("/user/profile")
 async def get_profile(user = Depends(get_current_user)):
+    active_packages = user.get("active_packages", [])
+    # Get package details
+    active_package_details = []
+    for pkg_id in active_packages:
+        pkg = next((p for p in PACKAGES if p["id"] == pkg_id), None)
+        if pkg:
+            active_package_details.append({"id": pkg["id"], "name": pkg["name"], "color": pkg["color"]})
+    
     return {
         "success": True,
         "user": {
@@ -239,39 +242,35 @@ async def get_profile(user = Depends(get_current_user)):
             "referral_income": user.get("referral_income", 0),
             "reward_income": user.get("reward_income", 0),
             "is_active": user.get("is_active", False),
-            "active_package_id": user.get("active_package_id"),
-            "active_package_name": user.get("active_package_name"),
+            "active_packages": active_package_details,
+            "withdrawal_qualified": user.get("withdrawal_qualified", False),
             "created_at": user.get("created_at")
         }
     }
 
 @api_router.get("/user/dashboard")
 async def get_dashboard(user = Depends(get_current_user)):
-    # Get active package
-    active_package = await db.user_packages.find_one({
-        "user_id": str(user["_id"]),
-        "is_active": True
-    })
+    active_packages = user.get("active_packages", [])
     
-    # Get referral count with same package
+    # Get package details for all active packages
+    active_package_details = []
+    for pkg_id in active_packages:
+        pkg = next((p for p in PACKAGES if p["id"] == pkg_id), None)
+        if pkg:
+            active_package_details.append({
+                "id": pkg["id"],
+                "name": pkg["name"],
+                "color": pkg["color"],
+                "glow": pkg["glow"],
+                "amount": pkg["amount"]
+            })
+    
+    # Get referral count
     referral_count = await db.referrals.count_documents({"referrer_id": str(user["_id"])})
-    same_package_referrals = 0
-    if user.get("active_package_id"):
-        same_package_referrals = await db.referrals.count_documents({
-            "referrer_id": str(user["_id"]),
-            "package_id": user.get("active_package_id")
-        })
     
     # Get total invested
     approved_deposits = await db.payments.find({"user_id": str(user["_id"]), "status": "approved"}).to_list(100)
     total_invested = sum(d.get("amount", 0) for d in approved_deposits)
-    
-    # Get package color
-    package_color = "#22C55E"  # Default green
-    if user.get("active_package_id"):
-        pkg = next((p for p in PACKAGES if p["id"] == user.get("active_package_id")), None)
-        if pkg:
-            package_color = pkg["color"]
     
     return {
         "success": True,
@@ -283,14 +282,11 @@ async def get_dashboard(user = Depends(get_current_user)):
             "referral_income": user.get("referral_income", 0),
             "reward_income": user.get("reward_income", 0),
             "is_active": user.get("is_active", False),
-            "has_active_package": active_package is not None,
-            "active_package_id": user.get("active_package_id"),
-            "active_package_name": user.get("active_package_name"),
-            "package_color": package_color,
+            "active_packages": active_package_details,
+            "active_packages_count": len(active_packages),
             "referral_count": referral_count,
-            "same_package_referrals": same_package_referrals,
             "my_referral_code": user.get("referral_code", ""),
-            "can_withdraw": same_package_referrals >= 2  # 2 direct IDs required
+            "withdrawal_qualified": user.get("withdrawal_qualified", False)
         }
     }
 
@@ -298,21 +294,26 @@ async def get_dashboard(user = Depends(get_current_user)):
 
 @api_router.get("/referrals/list")
 async def get_referrals(user = Depends(get_current_user)):
-    """Get list of referred members with package details"""
     referrals = await db.referrals.find({"referrer_id": str(user["_id"])}).to_list(1000)
     
     referred_users = []
     for ref in referrals:
         ref_user = await db.users.find_one({"_id": ObjectId(ref["referred_id"])})
         if ref_user:
+            # Get all packages this referral invested in
+            invested_packages = ref.get("invested_packages", [])
+            package_details = []
+            for pkg_id in invested_packages:
+                pkg = next((p for p in PACKAGES if p["id"] == pkg_id), None)
+                if pkg:
+                    package_details.append({"id": pkg["id"], "name": pkg["name"], "color": pkg["color"], "amount": pkg["amount"]})
+            
             referred_users.append({
                 "id": str(ref_user["_id"]),
                 "full_name": ref_user.get("full_name"),
                 "user_id": ref_user.get("user_id"),
                 "mobile": ref_user.get("mobile"),
-                "package_id": ref_user.get("active_package_id"),
-                "package_name": ref_user.get("active_package_name") or "No Package",
-                "package_amount": ref.get("package_amount", 0),
+                "invested_packages": package_details,
                 "is_active": ref_user.get("is_active", False),
                 "joined_at": ref.get("created_at")
             })
@@ -321,24 +322,12 @@ async def get_referrals(user = Depends(get_current_user)):
 
 @api_router.get("/referrals/stats")
 async def get_referral_stats(user = Depends(get_current_user)):
-    """Get referral statistics for withdrawal eligibility"""
     total_referrals = await db.referrals.count_documents({"referrer_id": str(user["_id"])})
-    
-    # Count referrals with same package
-    same_package_count = 0
-    if user.get("active_package_id"):
-        same_package_count = await db.referrals.count_documents({
-            "referrer_id": str(user["_id"]),
-            "package_id": user.get("active_package_id")
-        })
     
     return {
         "success": True,
         "total_referrals": total_referrals,
-        "same_package_referrals": same_package_count,
-        "can_withdraw": same_package_count >= 2,
-        "required_for_withdrawal": 2,
-        "active_package_id": user.get("active_package_id")
+        "withdrawal_qualified": user.get("withdrawal_qualified", False)
     }
 
 # ==================== PACKAGE ENDPOINTS ====================
@@ -416,22 +405,14 @@ async def get_my_packages(user = Depends(get_current_user)):
 
 @api_router.post("/wallet/withdraw")
 async def request_withdrawal(data: WithdrawalRequest, user = Depends(get_current_user)):
-    # Verify transaction password
     if not verify_password(data.transaction_password, user.get("transaction_password", "")):
         raise HTTPException(status_code=401, detail="Invalid transaction password")
     
-    # Check 2 direct IDs requirement
-    same_package_referrals = 0
-    if user.get("active_package_id"):
-        same_package_referrals = await db.referrals.count_documents({
-            "referrer_id": str(user["_id"]),
-            "package_id": user.get("active_package_id")
-        })
-    
-    if same_package_referrals < 2:
+    # Check if user is withdrawal qualified (one-time check)
+    if not user.get("withdrawal_qualified", False):
         raise HTTPException(
-            status_code=400, 
-            detail=f"You need at least 2 direct referrals with the same package to withdraw. Current: {same_package_referrals}"
+            status_code=400,
+            detail="You need at least 2 direct referrals with the same package to qualify for withdrawal."
         )
     
     if user.get("wallet_balance", 0) < data.amount:
@@ -471,19 +452,9 @@ async def get_withdrawals(user = Depends(get_current_user)):
 
 @api_router.get("/wallet/withdrawal-eligibility")
 async def check_withdrawal_eligibility(user = Depends(get_current_user)):
-    """Check if user can withdraw based on 2 direct IDs rule"""
-    same_package_referrals = 0
-    if user.get("active_package_id"):
-        same_package_referrals = await db.referrals.count_documents({
-            "referrer_id": str(user["_id"]),
-            "package_id": user.get("active_package_id")
-        })
-    
     return {
         "success": True,
-        "can_withdraw": same_package_referrals >= 2,
-        "same_package_referrals": same_package_referrals,
-        "required": 2,
+        "withdrawal_qualified": user.get("withdrawal_qualified", False),
         "wallet_balance": user.get("wallet_balance", 0),
         "min_withdrawal": 500,
         "admin_charge_percent": 10
@@ -493,15 +464,15 @@ async def check_withdrawal_eligibility(user = Depends(get_current_user)):
 
 @api_router.get("/rewards/eligible")
 async def get_eligible_rewards(user = Depends(get_current_user)):
-    """Get reward status for each package - Locked/Active/Unlocked"""
-    user_package_id = user.get("active_package_id")
+    user_packages = user.get("active_packages", [])
     
     # Count referrals per package
     referral_counts = {}
     for pkg in PACKAGES:
+        # Count how many referrals have invested in this package
         count = await db.referrals.count_documents({
             "referrer_id": str(user["_id"]),
-            "package_id": pkg["id"]
+            "invested_packages": pkg["id"]
         })
         referral_counts[pkg["id"]] = count
     
@@ -516,11 +487,6 @@ async def get_eligible_rewards(user = Depends(get_current_user)):
     for pkg in PACKAGES:
         pkg_referrals = referral_counts.get(pkg["id"], 0)
         pkg_rewards = REWARD_STRUCTURE.get(pkg["id"], {})
-        
-        # Determine status
-        # Locked: No referrals with this package
-        # Active: Has referrals but not reached 25/50 target
-        # Unlocked: Reached 25 or 50 target
         
         status_25 = "locked"
         status_50 = "locked"
@@ -564,18 +530,17 @@ async def get_eligible_rewards(user = Depends(get_current_user)):
     return {
         "success": True,
         "rewards": rewards_status,
-        "active_package_id": user_package_id
+        "active_packages": user_packages
     }
 
 @api_router.post("/rewards/claim")
 async def claim_reward(data: dict, user = Depends(get_current_user)):
     package_id = data.get("package_id")
-    reward_type = data.get("reward_type")  # "25_ids" or "50_ids"
+    reward_type = data.get("reward_type")
     
     if reward_type not in ["25_ids", "50_ids"]:
         raise HTTPException(status_code=400, detail="Invalid reward type")
     
-    # Check if already claimed
     existing = await db.rewards.find_one({
         "user_id": str(user["_id"]),
         "package_id": package_id,
@@ -585,11 +550,10 @@ async def claim_reward(data: dict, user = Depends(get_current_user)):
     if existing:
         raise HTTPException(status_code=400, detail="Reward already claimed")
     
-    # Check eligibility
     required = 25 if reward_type == "25_ids" else 50
     referral_count = await db.referrals.count_documents({
         "referrer_id": str(user["_id"]),
-        "package_id": package_id
+        "invested_packages": package_id
     })
     
     if referral_count < required:
@@ -719,7 +683,7 @@ async def verify_payment(data: dict, admin = Depends(get_current_admin)):
     if status == "approved":
         package = next((p for p in PACKAGES if p["id"] == payment.get("package_id")), None)
         if package:
-            # Create user package
+            # Create user package record
             await db.user_packages.insert_one({
                 "user_id": payment["user_id"],
                 "package_id": package["id"],
@@ -731,17 +695,16 @@ async def verify_payment(data: dict, admin = Depends(get_current_admin)):
                 "expires_at": (datetime.utcnow() + timedelta(days=package["duration_days"])).isoformat()
             })
             
-            # Activate user and set active package
+            # ADD package to user's active_packages array (not replace!)
             await db.users.update_one(
                 {"_id": ObjectId(payment["user_id"])},
-                {"$set": {
-                    "is_active": True,
-                    "active_package_id": package["id"],
-                    "active_package_name": package["name"]
-                }}
+                {
+                    "$set": {"is_active": True},
+                    "$addToSet": {"active_packages": package["id"]}  # Add to array, no duplicates
+                }
             )
             
-            # Process referral income (10%)
+            # Process referral income (10%) and update referral's invested_packages
             user = await db.users.find_one({"_id": ObjectId(payment["user_id"])})
             if user and user.get("referrer_id"):
                 referrer = await db.users.find_one({"_id": ObjectId(user["referrer_id"])})
@@ -759,17 +722,17 @@ async def verify_payment(data: dict, admin = Depends(get_current_admin)):
                         }}
                     )
                     
-                    # Update referral record with package info
+                    # Update referral record - add package to invested_packages array
                     await db.referrals.update_one(
                         {"referred_id": payment["user_id"]},
-                        {"$set": {
-                            "package_id": package["id"],
-                            "package_name": package["name"],
-                            "package_amount": package["amount"],
-                            "commission_paid": True,
-                            "commission_amount": referral_income,
-                            "commission_date": datetime.utcnow().isoformat()
-                        }}
+                        {
+                            "$addToSet": {"invested_packages": package["id"]},
+                            "$set": {
+                                "last_package_name": package["name"],
+                                "last_package_amount": package["amount"],
+                                "last_commission_date": datetime.utcnow().isoformat()
+                            }
+                        }
                     )
                     
                     # Record transaction
@@ -782,6 +745,23 @@ async def verify_payment(data: dict, admin = Depends(get_current_admin)):
                         "description": f"10% referral commission from {user.get('full_name')}",
                         "created_at": datetime.utcnow().isoformat()
                     })
+                    
+                    # CHECK if referrer now qualifies for withdrawal
+                    # Count referrals who invested in the same package
+                    referrer_packages = referrer.get("active_packages", [])
+                    if not referrer.get("withdrawal_qualified", False):
+                        for pkg_id in referrer_packages:
+                            count = await db.referrals.count_documents({
+                                "referrer_id": str(referrer["_id"]),
+                                "invested_packages": pkg_id
+                            })
+                            if count >= 2:
+                                # Qualify for lifetime withdrawal!
+                                await db.users.update_one(
+                                    {"_id": referrer["_id"]},
+                                    {"$set": {"withdrawal_qualified": True}}
+                                )
+                                break
     
     return {"success": True, "message": f"Payment {status}"}
 
@@ -820,7 +800,6 @@ async def verify_reward(data: dict, admin = Depends(get_current_admin)):
             {"$set": {"status": "approved", "verified_at": datetime.utcnow().isoformat()}}
         )
         
-        # Credit reward to user
         await db.users.update_one(
             {"_id": ObjectId(reward["user_id"])},
             {"$inc": {
@@ -853,13 +832,15 @@ async def get_all_users(admin = Depends(get_current_admin)):
 
 @api_router.get("/admin/referrals")
 async def get_all_referrals(admin = Depends(get_current_admin)):
-    """Get all referrals for admin with full details"""
     referrals = await db.referrals.find({}).sort("created_at", -1).to_list(1000)
     
     result = []
     for ref in referrals:
         referrer = await db.users.find_one({"_id": ObjectId(ref["referrer_id"])})
         referred = await db.users.find_one({"_id": ObjectId(ref["referred_id"])})
+        
+        invested_packages = ref.get("invested_packages", [])
+        package_names = [next((p["name"] for p in PACKAGES if p["id"] == pid), pid) for pid in invested_packages]
         
         result.append({
             "id": str(ref["_id"]),
@@ -869,10 +850,7 @@ async def get_all_referrals(admin = Depends(get_current_admin)):
             "referred_name": referred.get("full_name") if referred else "Unknown",
             "referred_user_id": referred.get("user_id") if referred else "Unknown",
             "referred_mobile": referred.get("mobile") if referred else "Unknown",
-            "package_name": ref.get("package_name") or "No Package",
-            "package_amount": ref.get("package_amount", 0),
-            "commission_paid": ref.get("commission_paid", False),
-            "commission_amount": ref.get("commission_amount", 0),
+            "invested_packages": package_names,
             "created_at": ref.get("created_at")
         })
     
@@ -903,7 +881,6 @@ async def update_settings(data: dict, admin = Depends(get_current_admin)):
 
 @app.on_event("startup")
 async def startup():
-    # Create default referrer
     if not await db.users.find_one({"referral_code": "ADMIN001"}):
         await db.users.insert_one({
             "full_name": "System",
@@ -912,6 +889,8 @@ async def startup():
             "login_password": hash_password("admin123"),
             "transaction_password": hash_password("admin123"),
             "is_active": True,
+            "active_packages": [],
+            "withdrawal_qualified": True,
             "wallet_balance": 0,
             "created_at": datetime.utcnow().isoformat()
         })
@@ -920,7 +899,7 @@ app.include_router(api_router)
 
 @app.get("/")
 async def root():
-    return {"status": "ok", "message": "Growmore Exchange API v3"}
+    return {"status": "ok", "message": "Growmore Exchange API v4"}
 
 @app.get("/health")
 async def health():
