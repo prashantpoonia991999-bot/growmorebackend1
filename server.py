@@ -820,6 +820,91 @@ async def verify_reward(data: dict, admin = Depends(get_current_admin)):
     
     raise HTTPException(status_code=400, detail="Invalid action")
 
+# ==================== DAILY INCOME CRON ====================
+
+@api_router.post("/admin/process-daily-income")
+async def process_daily_income(admin = Depends(get_current_admin)):
+    """
+    Process daily income for all users with active packages.
+    Should be called via cron job at midnight (12:00 AM IST).
+    """
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    
+    # Check if already processed today
+    existing = await db.daily_income_logs.find_one({"date": today})
+    if existing:
+        return {"success": False, "message": "Daily income already processed today", "processed_count": existing.get("processed_count", 0)}
+    
+    processed_count = 0
+    total_credited = 0
+    
+    # Get all active user packages
+    active_packages = await db.user_packages.find({"is_active": True}).to_list(10000)
+    
+    for user_pkg in active_packages:
+        user_id = user_pkg.get("user_id")
+        daily_income = user_pkg.get("daily_income", 0)
+        
+        if daily_income > 0:
+            # Credit daily income to user's wallet
+            await db.users.update_one(
+                {"_id": ObjectId(user_id)},
+                {"$inc": {
+                    "wallet_balance": daily_income,
+                    "total_income": daily_income,
+                    "today_income": daily_income
+                }}
+            )
+            
+            # Record transaction
+            await db.transactions.insert_one({
+                "user_id": user_id,
+                "type": "daily_income",
+                "amount": daily_income,
+                "package_name": user_pkg.get("package_name"),
+                "description": f"Daily income from {user_pkg.get('package_name')}",
+                "created_at": datetime.utcnow().isoformat()
+            })
+            
+            processed_count += 1
+            total_credited += daily_income
+    
+    # Reset today_income for all users (new day)
+    await db.users.update_many({}, {"$set": {"today_income": 0}})
+    
+    # Then credit today's income
+    for user_pkg in active_packages:
+        user_id = user_pkg.get("user_id")
+        daily_income = user_pkg.get("daily_income", 0)
+        if daily_income > 0:
+            await db.users.update_one(
+                {"_id": ObjectId(user_id)},
+                {"$set": {"today_income": daily_income}}
+            )
+    
+    # Log this processing
+    await db.daily_income_logs.insert_one({
+        "date": today,
+        "processed_count": processed_count,
+        "total_credited": total_credited,
+        "processed_at": datetime.utcnow().isoformat()
+    })
+    
+    return {
+        "success": True,
+        "message": f"Daily income processed for {processed_count} active packages",
+        "processed_count": processed_count,
+        "total_credited": total_credited
+    }
+
+@api_router.get("/admin/daily-income-logs")
+async def get_daily_income_logs(admin = Depends(get_current_admin)):
+    """Get logs of daily income processing"""
+    logs = await db.daily_income_logs.find({}).sort("date", -1).to_list(30)
+    for log in logs:
+        log["id"] = str(log.pop("_id"))
+    return {"success": True, "logs": logs}
+
 @api_router.get("/admin/users")
 async def get_all_users(admin = Depends(get_current_admin)):
     users = await db.users.find({}).to_list(1000)
