@@ -251,7 +251,7 @@ async def download_web():
 @api_router.get("/download-user-panel")
 async def download_user_panel():
     """Download Complete Panel (User + Admin) for Hostinger - 3.9MB"""
-    path = ROOT_DIR / "static" / "growmore-v5.zip"
+    path = ROOT_DIR / "static" / "growmore-v6.zip"
     if not path.exists():
         raise HTTPException(status_code=404, detail="Panel not found")
     return FileResponse(path=str(path), filename="growmore-complete.zip", media_type="application/zip")
