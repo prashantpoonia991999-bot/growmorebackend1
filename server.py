@@ -1775,3 +1775,12 @@ async def download_user_panel_v3():
         raise HTTPException(status_code=404, detail="User panel v3 not found")
     return FileResponse(path=str(path), filename="user-panel-v3.zip", media_type="application/zip")
 
+# Download Latest Hostinger Build (User + Admin Combined)
+@api_router.get("/download-hostinger-final")
+async def download_hostinger_final():
+    """Download Latest Complete Build for Hostinger - 3.9MB with all fixes"""
+    path = ROOT_DIR / "static" / "growmore-hostinger-final.zip"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Hostinger build not found")
+    return FileResponse(path=str(path), filename="growmore-hostinger-final.zip", media_type="application/zip")
+
