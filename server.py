@@ -283,6 +283,15 @@ async def download_railway_backend():
         raise HTTPException(status_code=404, detail="Railway backend not found")
     return FileResponse(path=str(path), filename="railway-backend.zip", media_type="application/zip")
 
+# Download Latest Hostinger Build (User + Admin Combined) - 3.9MB
+@api_router.get("/download-hostinger-final")
+async def download_hostinger_final():
+    """Download Latest Complete Build for Hostinger - 3.9MB with all fixes"""
+    path = ROOT_DIR / "static" / "growmore-hostinger-final.zip"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Hostinger build not found")
+    return FileResponse(path=str(path), filename="growmore-hostinger-final.zip", media_type="application/zip")
+
 def generate_referral_code(length: int = 8) -> str:
     chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'
     return ''.join(random.choice(chars) for _ in range(length))
