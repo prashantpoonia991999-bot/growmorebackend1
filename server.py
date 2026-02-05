@@ -250,8 +250,8 @@ async def download_web():
 # Download User Panel for Hostinger
 @api_router.get("/download-user-panel")
 async def download_user_panel():
-    """Download Complete Panel (User + Admin) for Hostinger"""
-    path = ROOT_DIR / "static" / "growmore-final.zip"
+    """Download Complete Panel (User + Admin) for Hostinger - 3.9MB"""
+    path = ROOT_DIR / "static" / "growmore-v5.zip"
     if not path.exists():
         raise HTTPException(status_code=404, detail="Panel not found")
     return FileResponse(path=str(path), filename="growmore-complete.zip", media_type="application/zip")
@@ -1244,8 +1244,10 @@ async def get_all_users(user = Depends(get_current_admin)):
     for u in users:
         u['id'] = str(u['_id'])
         del u['_id']
-        del u['login_password']
-        del u['transaction_password']
+        # Safely remove password fields
+        u.pop('login_password', None)
+        u.pop('transaction_password', None)
+        u.pop('password_hash', None)
     return {"success": True, "users": users}
 
 @api_router.post("/admin/verify-payment")
